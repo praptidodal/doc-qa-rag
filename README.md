@@ -1,84 +1,86 @@
 # Document Q&A Assistant
 
-A production-ready, minimal Retrieval-Augmented Generation (RAG) assistant built with Streamlit, ChromaDB, Sentence-Transformers, and Groq.
+A production-ready, minimal Retrieval-Augmented Generation (RAG) assistant built with Python, Streamlit, ChromaDB, Sentence-Transformers, and Groq.
 
 ---
 
-## Architecture & Pipeline
+## Overview
+
+The Document Q&A Assistant allows users to upload PDF and TXT documents, chunk and index them into a local vector database, and ask questions through a chat interface. Answers are generated strictly from the uploaded content using an LLM.
+
+---
+
+## Pipeline
 
 ```
 PDF / TXT files
       │
       ▼
- extract_pages()          ← pypdf for PDFs, UTF-8 decode for TXT
+ extract_pages()          Extract text per page (pypdf for PDFs, UTF-8 for TXT)
       │
       ▼
-  chunk_text()            ← Configurable chunk size (200–1000 chars, 50 overlap)
+  chunk_text()            Character chunking (configurable size 200–1000, 50 overlap)
       │
       ▼
-all-MiniLM-L6-v2          ← sentence-transformers embedding model
+all-MiniLM-L6-v2          sentence-transformers embedding model (384 dimensions)
       │
       ▼
-ChromaDB (Persistent)     ← Cosine-distance vector store in chroma_db/
+ChromaDB (Persistent)     Cosine-distance index saved locally in chroma_db/
       │
-      ▼  (user question)
- rewrite_query()          ← Context-aware follow-up query rewriting (uses history)
-      │
-      ▼
- retrieve_chunks()        ← Top-K cosine search + DISTANCE_THRESHOLD filtering
+      ▼ (user question)
+ rewrite_query()          Reformulates conversational follow-ups into standalone queries
       │
       ▼
- generate_answer()        ← Groq LLM (qwen/qwen3.8-27b) with grounded context
+ retrieve_chunks()        Top-K cosine nearest-neighbors + DISTANCE_THRESHOLD filtering
       │
       ▼
-  Streamlit UI            ← Answer + match percentages in Sources + chat history
+ generate_answer()        Groq (qwen/qwen3.8-27b) generates grounded answers
+      │
+      ▼
+  Streamlit UI            Displays answer, match percentages in Sources, and history
 ```
 
 ---
 
-## Features
+## Setup & Run
 
-1. **Multi-Format Ingestion:** Upload multiple PDFs and TXTs; extracts text per page using `pypdf`.
-2. **Persistent Vector Storage:** Saved in `chroma_db/` so your indexed documents survive app restarts.
-3. **Smart Deduplication:** Automatically detects and skips files that are already indexed.
-4. **Follow-Up Question Rewriting:** Conversational memory detects follow-ups (e.g. *"tell me more about it"*) and rewrites them into standalone queries before retrieval.
-5. **Hallucination Shield:** Cosine distance thresholding (`DISTANCE_THRESHOLD=0.72`) skips the LLM call entirely when a question has no relevant chunks.
-6. **Relevance Percentages:** Each retrieved source displays an exact match confidence score (e.g., `82% match`).
-7. **5-Bullet Document Summarizer:** Automatically analyzes the first chunks of all uploaded files to produce an instant executive summary.
-8. **Interactive Controls:** Sidebar sliders for chunk size (200–1000) and Top-K retrieved chunks (1–8).
-
----
-
-## Quick Start
-
-### 1 — Clone and enter the project
+### 1. Clone or navigate to the repository
 
 ```bash
-git clone <your-repo-url>
 cd doc-qa-rag
 ```
 
-### 2 — Create and activate virtual environment
+### 2. Create and activate a virtual environment
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 ```
 
-### 3 — Install dependencies
+### 3. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 4 — Add your Groq API key
+### 4. Configure environment variables
+
+Copy the example file and add your Groq API key:
 
 ```bash
 cp .env.example .env
-# Edit .env and paste your GROQ_API_KEY from https://console.groq.com/keys
 ```
 
-### 5 — Run the app
+Edit `.env`:
+```env
+GROQ_API_KEY=gsk_your_actual_key_here
+LLM_MODEL=qwen/qwen3.8-27b
+DISTANCE_THRESHOLD=0.72
+```
+
+> Get a free Groq API key at <https://console.groq.com/keys>.
+
+### 5. Start the application
 
 ```bash
 streamlit run app.py
@@ -88,19 +90,28 @@ Open <http://localhost:8501> in your browser.
 
 ---
 
-## Configuration (`.env`)
+## Features
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `GROQ_API_KEY` | *(required)* | Groq Cloud API key |
-| `LLM_MODEL` | `qwen/qwen3.8-27b` | Swappable to any Groq chat model |
-| `DISTANCE_THRESHOLD` | `0.72` | Cosine distance cut-off for grounding |
+- **Document Ingestion & Deduplication:** Uploads PDF/TXT files, extracts text page-by-page, and automatically skips re-indexing files that are already stored.
+- **Persistent Local Index:** Embeddings and chunks persist in `chroma_db/`, surviving application restarts.
+- **Selective Management:** Choose specific indexed files to summarize or remove from the index.
+- **Context-Aware Query Rewriting:** Conversational pronouns (e.g., *"tell me more about it"*) are rewritten into standalone questions before retrieval using the recent chat history.
+- **Fail-Fast Grounding (Thresholding):** Questions whose nearest chunk distance exceeds `DISTANCE_THRESHOLD` return *"I couldn't find that in the uploaded documents."* without invoking the LLM, preventing hallucination and reducing unnecessary API cost.
+- **Relevance Confidence Scores:** Each retrieved chunk displays a match percentage computed directly from its cosine distance.
+- **5-Bullet Summarizer:** Synthesizes the opening sections of selected documents into 5 concise bullet points.
+- **Tuning Controls:** Live sidebar sliders for chunk size (200–1000) and Top-K retrieval (1–8).
 
 ---
 
-## Design Notes & Interview Talking Points
+## Design Notes & Provider Swapping
 
-- **Provider Isolation:** The LLM call is isolated in one function (`generate_answer`), allowing seamless provider switches (Gemini → Groq) without touching chunking or vector search.
-- **Query Disambiguation:** Resolving pronouns before retrieval prevents vector search failures on multi-turn conversations.
-- **Fail-Fast Retrieval:** Filtering queries with high cosine distances avoids unnecessary API costs and prevents hallucinations on out-of-domain questions.
-- **Stateless Model, Stateful Store:** Embeddings are persisted in local ChromaDB storage, while the chat state is maintained via Streamlit `session_state`.
+- **Gemini to Groq Migration:** The LLM integration is completely encapsulated inside the `generate_answer()` and `rewrite_query()` functions. When switching providers (such as moving from Gemini to Groq), chunking, vector indexing, embedding, and retrieval remain completely untouched.
+- **Model Config in Environment:** Model identifiers are read from `LLM_MODEL` in `.env`, allowing model deprecations or upgrades to be handled with a one-line config change rather than code refactoring.
+
+---
+
+## Limitations
+
+- **Scanned Documents:** Only text-based PDFs are parsed. Scanned or image-only documents require OCR preprocessing before upload.
+- **Local Single-User Storage:** The persistent ChromaDB directory is designed for local single-user use and is not set up for distributed multi-tenant concurrency.
+- **Context Truncation:** Large files produce multiple chunks; only the top-K most similar chunks are passed to the LLM.
