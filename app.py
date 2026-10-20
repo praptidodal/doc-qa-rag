@@ -234,6 +234,47 @@ Answer:"""
         return f"❌ Groq API error: {exc}"
 
 
+def rewrite_query(question: str, history: list[dict]) -> str:
+    """
+    If chat history exists, call the LLM with the last 3 messages plus the new question
+    to rewrite it as a standalone question that needs no previous context.
+    If there is no history or rewrite fails, return question unchanged.
+    """
+    if not history or not GROQ_API_KEY:
+        return question
+
+    # Use the last 3 messages for conversational context
+    context_msgs = history[-3:]
+    conversation_snippet = "\n".join(
+        f"{m['role'].capitalize()}: {m['content']}" for m in context_msgs
+    )
+
+    prompt = f"""Given the following conversation history and a follow-up question, rephrase the follow-up question to be a standalone, self-contained question that can be understood without the conversation history. Do NOT answer the question, only return the rewritten question.
+
+Conversation History:
+{conversation_snippet}
+
+Follow-up Question: {question}
+
+Standalone Question:"""
+
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+        )
+        rewritten = response.choices[0].message.content.strip().strip('"')
+        if rewritten:
+            print(f"[Query Rewrite] Original: '{question}' -> Standalone: '{rewritten}'")
+            return rewritten
+        return question
+    except Exception as exc:
+        print(f"[Query Rewrite] Error: {exc}, using original question.")
+        return question
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # UI
 # ─────────────────────────────────────────────────────────────────────────────
@@ -279,6 +320,9 @@ def main() -> None:
     for entry in st.session_state.chat_history:
         with st.chat_message(entry["role"]):
             st.markdown(entry["content"])
+            # Display rewritten search query if applicable
+            if entry["role"] == "assistant" and entry.get("searched_for"):
+                st.markdown(f"<small style='color: grey;'>Searched for: {entry['searched_for']}</small>", unsafe_allow_html=True)
             # Re-display source expanders for assistant messages (only if not a refusal)
             if entry["role"] == "assistant" and entry.get("sources") and entry.get("content", "").strip() != NOT_FOUND_MESSAGE:
                 with st.expander("🔍 Sources"):
@@ -296,15 +340,21 @@ def main() -> None:
             st.warning("⬅️ Please upload and process documents first.")
             st.stop()
 
+        # Capture history before appending current user message
+        prior_history = list(st.session_state.chat_history)
+
         # Show user message immediately
         st.session_state.chat_history.append({"role": "user", "content": question, "sources": []})
         with st.chat_message("user"):
             st.markdown(question)
 
+        # If there is prior chat history, rewrite follow-up question into a standalone query for retrieval
+        search_query = rewrite_query(question, prior_history) if prior_history else question
+
         # Retrieve + generate
         with st.chat_message("assistant"):
             with st.spinner("Searching documents and generating answer …"):
-                chunks, distances = retrieve_chunks(question, st.session_state.collection)
+                chunks, distances = retrieve_chunks(search_query, st.session_state.collection)
 
                 # If best chunk distance is above threshold, skip LLM call
                 if distances and distances[0] > DISTANCE_THRESHOLD:
@@ -314,6 +364,10 @@ def main() -> None:
                     answer = generate_answer(question, chunks)
 
             st.markdown(answer)
+
+            # Show rewritten query in small grey text
+            if search_query != question:
+                st.markdown(f"<small style='color: grey;'>Searched for: {search_query}</small>", unsafe_allow_html=True)
 
             # Source expander: only show if answer is NOT the refusal message
             is_refusal = (answer.strip() == NOT_FOUND_MESSAGE)
@@ -326,9 +380,10 @@ def main() -> None:
 
         # Persist to history
         st.session_state.chat_history.append({
-            "role":    "assistant",
-            "content": answer,
-            "sources": [] if is_refusal else chunks,
+            "role":         "assistant",
+            "content":      answer,
+            "sources":      [] if is_refusal else chunks,
+            "searched_for": search_query if search_query != question else None,
         })
 
 
