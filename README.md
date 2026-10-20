@@ -1,10 +1,10 @@
 # Document Q&A Assistant
 
-A minimal Retrieval-Augmented Generation (RAG) application built with Streamlit, ChromaDB, sentence-transformers, and Groq.
+A production-ready, minimal Retrieval-Augmented Generation (RAG) assistant built with Streamlit, ChromaDB, Sentence-Transformers, and Groq.
 
 ---
 
-## Pipeline
+## Architecture & Pipeline
 
 ```
 PDF / TXT files
@@ -13,23 +13,39 @@ PDF / TXT files
  extract_pages()          ← pypdf for PDFs, UTF-8 decode for TXT
       │
       ▼
-  chunk_text()            ← 500-char chunks, 50-char overlap
+  chunk_text()            ← Configurable chunk size (200–1000 chars, 50 overlap)
       │
       ▼
 all-MiniLM-L6-v2          ← sentence-transformers embedding model
       │
       ▼
-   ChromaDB               ← in-memory vector store (rebuilt on each upload)
+ChromaDB (Persistent)     ← Cosine-distance vector store in chroma_db/
       │
       ▼  (user question)
- retrieve_chunks()        ← embed question → top-4 cosine-similar chunks
+ rewrite_query()          ← Context-aware follow-up query rewriting (uses history)
       │
       ▼
- generate_answer()        ← Groq (llama-3.3-70b-versatile) with context-only prompt
+ retrieve_chunks()        ← Top-K cosine search + DISTANCE_THRESHOLD filtering
       │
       ▼
-  Streamlit UI            ← answer + Sources expander + chat history
+ generate_answer()        ← Groq LLM (qwen/qwen3.8-27b) with grounded context
+      │
+      ▼
+  Streamlit UI            ← Answer + match percentages in Sources + chat history
 ```
+
+---
+
+## Features
+
+1. **Multi-Format Ingestion:** Upload multiple PDFs and TXTs; extracts text per page using `pypdf`.
+2. **Persistent Vector Storage:** Saved in `chroma_db/` so your indexed documents survive app restarts.
+3. **Smart Deduplication:** Automatically detects and skips files that are already indexed.
+4. **Follow-Up Question Rewriting:** Conversational memory detects follow-ups (e.g. *"tell me more about it"*) and rewrites them into standalone queries before retrieval.
+5. **Hallucination Shield:** Cosine distance thresholding (`DISTANCE_THRESHOLD=0.72`) skips the LLM call entirely when a question has no relevant chunks.
+6. **Relevance Percentages:** Each retrieved source displays an exact match confidence score (e.g., `82% match`).
+7. **5-Bullet Document Summarizer:** Automatically analyzes the first chunks of all uploaded files to produce an instant executive summary.
+8. **Interactive Controls:** Sidebar sliders for chunk size (200–1000) and Top-K retrieved chunks (1–8).
 
 ---
 
@@ -42,10 +58,10 @@ git clone <your-repo-url>
 cd doc-qa-rag
 ```
 
-### 2 — Create and activate a virtual environment
+### 2 — Create and activate virtual environment
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 ```
 
@@ -55,16 +71,12 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-> The first run downloads the ~90 MB `all-MiniLM-L6-v2` model automatically.
-
 ### 4 — Add your Groq API key
 
 ```bash
 cp .env.example .env
-# open .env and replace "your_key_here" with your actual key
+# Edit .env and paste your GROQ_API_KEY from https://console.groq.com/keys
 ```
-
-Get a free key at <https://console.groq.com/keys>.
 
 ### 5 — Run the app
 
@@ -76,32 +88,19 @@ Open <http://localhost:8501> in your browser.
 
 ---
 
-## Usage
+## Configuration (`.env`)
 
-1. **Sidebar → Upload Documents** — select one or more PDF/TXT files.
-2. Click **⚙️ Process documents** — the app chunks and indexes them.
-3. Type a question in the chat box at the bottom.
-4. The answer appears above; expand **🔍 Sources** to see the exact chunks used.
-
----
-
-## Key Configuration (top of `app.py`)
-
-| Constant | Default | Effect |
+| Variable | Default | Purpose |
 |---|---|---|
-| `CHUNK_SIZE` | `500` | Characters per chunk — smaller = more precise retrieval |
-| `CHUNK_OVERLAP` | `50` | Shared chars between chunks — prevents context loss at boundaries |
-| `TOP_K` | `4` | Chunks sent to the LLM — more = richer context but longer prompt |
-| `LLM_MODEL` | `llama-3.3-70b-versatile` | Swappable to any Groq-supported model (e.g. `llama-3.1-8b-instant`) |
+| `GROQ_API_KEY` | *(required)* | Groq Cloud API key |
+| `LLM_MODEL` | `qwen/qwen3.8-27b` | Swappable to any Groq chat model |
+| `DISTANCE_THRESHOLD` | `0.72` | Cosine distance cut-off for grounding |
 
 ---
 
-## Design Notes & Limitations
+## Design Notes & Interview Talking Points
 
-- **Provider isolation** — The LLM call is isolated in one function, so the provider can be swapped (Gemini → Groq) without touching retrieval.
-- **In-memory only** — the vector store is lost when the app restarts; re-upload to re-index.
-- **Scanned PDFs** — images-only PDFs yield no text; use OCR pre-processing first.
-- **Context window** — very large documents produce many chunks; only the top 4 reach the LLM.
-- **No authentication** — not suitable for multi-user production deployment as-is.
-- **Language** — `all-MiniLM-L6-v2` is optimised for English; multilingual accuracy may vary.
-
+- **Provider Isolation:** The LLM call is isolated in one function (`generate_answer`), allowing seamless provider switches (Gemini → Groq) without touching chunking or vector search.
+- **Query Disambiguation:** Resolving pronouns before retrieval prevents vector search failures on multi-turn conversations.
+- **Fail-Fast Retrieval:** Filtering queries with high cosine distances avoids unnecessary API costs and prevents hallucinations on out-of-domain questions.
+- **Stateless Model, Stateful Store:** Embeddings are persisted in local ChromaDB storage, while the chat state is maintained via Streamlit `session_state`.

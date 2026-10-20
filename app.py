@@ -122,7 +122,7 @@ def get_indexed_files(collection: chromadb.Collection) -> list[str]:
     return sorted(list({m["file"] for m in metas if m and "file" in m}))
 
 
-def add_files_to_vector_store(files, collection: chromadb.Collection) -> tuple[int, int]:
+def add_files_to_vector_store(files, collection: chromadb.Collection, chunk_size: int = CHUNK_SIZE) -> tuple[int, int]:
     """
     Extract, chunk, and embed only new files not yet in ChromaDB.
     Returns (new_chunks_count, total_chunks_count).
@@ -149,7 +149,7 @@ def add_files_to_vector_store(files, collection: chromadb.Collection) -> tuple[i
             continue
 
         for page_num, page_text in pages:
-            for chunk_idx, chunk in enumerate(chunk_text(page_text)):
+            for chunk_idx, chunk in enumerate(chunk_text(page_text, size=chunk_size, overlap=CHUNK_OVERLAP)):
                 uid = f"{f.name}::p{page_num}::c{chunk_idx}"
                 all_chunks.append(chunk)
                 all_ids.append(uid)
@@ -186,7 +186,7 @@ def clear_vector_store(client: chromadb.PersistentClient) -> chromadb.Collection
 # 5. RETRIEVAL + ANSWER GENERATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-def retrieve_chunks(question: str, collection: chromadb.Collection) -> tuple[list[dict], list[float]]:
+def retrieve_chunks(question: str, collection: chromadb.Collection, top_k: int = TOP_K) -> tuple[list[dict], list[float]]:
     """
     Embed *question* and return the top-K most similar chunks from ChromaDB
     along with their cosine distances.
@@ -196,7 +196,7 @@ def retrieve_chunks(question: str, collection: chromadb.Collection) -> tuple[lis
 
     results = collection.query(
         query_embeddings = [q_embedding],
-        n_results        = min(TOP_K, collection.count()),
+        n_results        = min(top_k, collection.count()),
         include          = ["documents", "metadatas", "distances"],
     )
 
@@ -304,6 +304,48 @@ Standalone Question:"""
         return question
 
 
+def summarize_documents(collection: chromadb.Collection) -> str:
+    """
+    Retrieve the first 6 chunks of each document in the collection
+    and ask the LLM to generate a concise summary with exactly 5 bullet points.
+    """
+    if collection.count() == 0:
+        return "No documents available to summarize."
+    if not GROQ_API_KEY:
+        return "❌ **GROQ_API_KEY is not set.**"
+
+    results = collection.get(include=["documents", "metadatas"])
+    docs = results.get("documents") or []
+    metas = results.get("metadatas") or []
+
+    file_chunks: dict[str, list[str]] = {}
+    for doc, meta in zip(docs, metas):
+        fname = meta.get("file", "Document")
+        file_chunks.setdefault(fname, []).append(doc)
+
+    combined_context = []
+    for fname, chunks in file_chunks.items():
+        combined_context.append(f"=== {fname} ===\n" + "\n\n".join(chunks[:6]))
+
+    prompt = f"""You are a helpful assistant. Provide a concise summary of the document(s) below in exactly 5 bullet points. Ground every point strictly in the provided text.
+
+Context:
+{"\n\n".join(combined_context)}
+
+Summary:"""
+
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+        )
+        return response.choices[0].message.content
+    except Exception as exc:
+        return f"❌ Groq API error: {exc}"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # UI
 # ─────────────────────────────────────────────────────────────────────────────
@@ -326,6 +368,22 @@ def main() -> None:
     with st.sidebar:
         st.header("📂 Documents")
 
+        # Settings sliders
+        st.subheader("⚙️ Settings")
+        chunk_size = st.slider(
+            "Chunk size (characters)",
+            min_value=200,
+            max_value=1000,
+            value=st.session_state.get("indexed_chunk_size", 500),
+            step=50,
+        )
+        top_k = st.slider("Top-K chunks", min_value=1, max_value=8, value=4, step=1)
+
+        if "indexed_chunk_size" in st.session_state and chunk_size != st.session_state.indexed_chunk_size:
+            st.caption("⚠️ Changing chunk size requires clicking 'Process' (or Clear all & re-process) to re-chunk.")
+
+        st.divider()
+
         # List already indexed files
         indexed_files = get_indexed_files(st.session_state.collection)
         if indexed_files:
@@ -335,7 +393,6 @@ def main() -> None:
         else:
             st.caption("No documents indexed yet.")
 
-        st.divider()
         uploaded_files = st.file_uploader(
             "Upload PDF or TXT files",
             type=["pdf", "txt"],
@@ -350,7 +407,12 @@ def main() -> None:
 
         if process_btn:
             with st.spinner("Extracting, chunking, and embedding new files …"):
-                new_chunks, total_chunks = add_files_to_vector_store(uploaded_files, st.session_state.collection)
+                new_chunks, total_chunks = add_files_to_vector_store(
+                    uploaded_files,
+                    st.session_state.collection,
+                    chunk_size=chunk_size,
+                )
+                st.session_state.indexed_chunk_size = chunk_size
             if new_chunks > 0:
                 st.success(f"✅ Added **{new_chunks}** new chunks! (Total: {total_chunks})")
                 st.rerun()
@@ -361,7 +423,16 @@ def main() -> None:
             collection = clear_vector_store(chroma_client)
             st.session_state.collection   = collection
             st.session_state.chat_history = []
+            if "doc_summary" in st.session_state:
+                del st.session_state.doc_summary
             st.success("Cleared all indexed documents!")
+            st.rerun()
+
+        # Summarize documents
+        st.divider()
+        if st.button("📋 Summarize documents", disabled=(st.session_state.collection.count() == 0)):
+            with st.spinner("Generating 5-bullet summary …"):
+                st.session_state.doc_summary = summarize_documents(st.session_state.collection)
             st.rerun()
 
         # Show API key status
@@ -370,6 +441,14 @@ def main() -> None:
             st.success("🔑 Groq API key loaded", icon="✅")
         else:
             st.warning("🔑 GROQ_API_KEY not found in `.env`")
+
+    # ── Document Summary (if generated) ──────────────────────────────────────
+    if st.session_state.get("doc_summary"):
+        with st.expander("📋 Document Summary (5 Key Points)", expanded=True):
+            st.markdown(st.session_state.doc_summary)
+            if st.button("Dismiss summary"):
+                del st.session_state.doc_summary
+                st.rerun()
 
     # ── Chat history ─────────────────────────────────────────────────────────
     for entry in st.session_state.chat_history:
@@ -410,7 +489,7 @@ def main() -> None:
         # Retrieve + generate
         with st.chat_message("assistant"):
             with st.spinner("Searching documents and generating answer …"):
-                chunks, distances = retrieve_chunks(search_query, st.session_state.collection)
+                chunks, distances = retrieve_chunks(search_query, st.session_state.collection, top_k=top_k)
 
                 # If best chunk distance is above threshold, skip LLM call
                 if distances and distances[0] > DISTANCE_THRESHOLD:
