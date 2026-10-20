@@ -304,9 +304,9 @@ Standalone Question:"""
         return question
 
 
-def summarize_documents(collection: chromadb.Collection) -> str:
+def summarize_documents(collection: chromadb.Collection, target_files: list[str] | None = None) -> str:
     """
-    Retrieve the first 6 chunks of each document in the collection
+    Retrieve the first 6 chunks of each document (or target_files) in the collection
     and ask the LLM to generate a concise summary with exactly 5 bullet points.
     """
     if collection.count() == 0:
@@ -318,10 +318,17 @@ def summarize_documents(collection: chromadb.Collection) -> str:
     docs = results.get("documents") or []
     metas = results.get("metadatas") or []
 
+    target_set = set(target_files) if target_files else None
+
     file_chunks: dict[str, list[str]] = {}
     for doc, meta in zip(docs, metas):
         fname = meta.get("file", "Document")
+        if target_set is not None and fname not in target_set:
+            continue
         file_chunks.setdefault(fname, []).append(doc)
+
+    if not file_chunks:
+        return "No chunks found for the selected document(s)."
 
     combined_context = []
     for fname, chunks in file_chunks.items():
@@ -384,15 +391,41 @@ def main() -> None:
 
         st.divider()
 
-        # List already indexed files
+        # Manage already indexed files
+        st.subheader("📚 Indexed Files")
         indexed_files = get_indexed_files(st.session_state.collection)
         if indexed_files:
-            st.markdown(f"**Indexed files ({len(indexed_files)}):**")
-            for fname in indexed_files:
-                st.caption(f"📄 {fname}")
+            selected_files = st.multiselect(
+                "Choose file(s) to summarize or remove:",
+                options=indexed_files,
+                default=indexed_files,
+                help="Select which indexed files to summarize or delete.",
+            )
+
+            col_sum, col_del = st.columns(2)
+            with col_sum:
+                sum_btn = st.button("📋 Summarize", disabled=(len(selected_files) == 0), help="Summarize selected files")
+            with col_del:
+                del_btn = st.button("🗑️ Remove", disabled=(len(selected_files) == 0), help="Delete selected files from index")
+
+            if sum_btn:
+                with st.spinner(f"Generating 5-bullet summary for {len(selected_files)} file(s) …"):
+                    st.session_state.doc_summary = summarize_documents(st.session_state.collection, target_files=selected_files)
+                st.rerun()
+
+            if del_btn:
+                with st.spinner(f"Removing {len(selected_files)} file(s) …"):
+                    for fname in selected_files:
+                        st.session_state.collection.delete(where={"file": fname})
+                if "doc_summary" in st.session_state:
+                    del st.session_state.doc_summary
+                st.success(f"Removed {len(selected_files)} file(s) from index!")
+                st.rerun()
         else:
             st.caption("No documents indexed yet.")
 
+        st.divider()
+        st.markdown("**Add Documents**")
         uploaded_files = st.file_uploader(
             "Upload PDF or TXT files",
             type=["pdf", "txt"],
@@ -426,13 +459,6 @@ def main() -> None:
             if "doc_summary" in st.session_state:
                 del st.session_state.doc_summary
             st.success("Cleared all indexed documents!")
-            st.rerun()
-
-        # Summarize documents
-        st.divider()
-        if st.button("📋 Summarize documents", disabled=(st.session_state.collection.count() == 0)):
-            with st.spinner("Generating 5-bullet summary …"):
-                st.session_state.doc_summary = summarize_documents(st.session_state.collection)
             st.rerun()
 
         # Show API key status
