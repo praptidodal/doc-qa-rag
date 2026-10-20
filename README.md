@@ -100,7 +100,6 @@ Open <http://localhost:8501> in your browser.
 - **Persistent Local Index:** Embeddings and chunks persist in `chroma_db/`, surviving application restarts.
 - **Selective Management:** Choose specific indexed files to summarize or remove from the index.
 - **Context-Aware Query Rewriting:** Conversational pronouns (e.g., *"tell me more about it"*) are rewritten into standalone questions before retrieval using the recent chat history.
-- **Fail-Fast Grounding (Thresholding):** Questions whose nearest chunk distance exceeds `DISTANCE_THRESHOLD` return *"I couldn't find that in the uploaded documents."* without invoking the LLM, preventing hallucination and reducing unnecessary API cost.
 - **Relevance Confidence Scores:** Each retrieved chunk displays a match percentage computed directly from its cosine distance.
 - **5-Bullet Summarizer:** Synthesizes the opening sections of selected documents into 5 concise bullet points.
 - **Tuning Controls:** Live sidebar sliders for chunk size (200–1000) and Top-K retrieval (1–8).
