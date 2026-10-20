@@ -10,8 +10,22 @@ import streamlit as st
 
 load_dotenv()
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-LLM_MODEL = os.getenv("LLM_MODEL", "qwen/qwen3.8-27b")
+
+def get_secret(key: str, default: str = "") -> str:
+    """Retrieve secret from environment variable or Streamlit Cloud secrets."""
+    val = os.getenv(key)
+    if val:
+        return val
+    try:
+        if hasattr(st, "secrets") and key in st.secrets:
+            return str(st.secrets[key])
+    except Exception:
+        pass
+    return default
+
+
+GROQ_API_KEY = get_secret("GROQ_API_KEY", "")
+LLM_MODEL = get_secret("LLM_MODEL", "qwen/qwen3.8-27b")
 
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
