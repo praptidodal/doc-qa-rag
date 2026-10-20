@@ -26,10 +26,12 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 # ── Constants ─────────────────────────────────────────────────────────────────
 CHUNK_SIZE    = 500    # characters per chunk
 CHUNK_OVERLAP = 50     # characters shared between neighbouring chunks
-TOP_K         = 4      # number of chunks to retrieve
-EMBED_MODEL   = "all-MiniLM-L6-v2"
-LLM_MODEL     = os.getenv("LLM_MODEL", "qwen/qwen3.8-27b")  # override in .env
-COLLECTION    = "doc_qa"
+TOP_K              = 4      # number of chunks to retrieve
+EMBED_MODEL        = "all-MiniLM-L6-v2"
+LLM_MODEL          = os.getenv("LLM_MODEL", "qwen/qwen3.8-27b")  # override in .env
+DISTANCE_THRESHOLD = float(os.getenv("DISTANCE_THRESHOLD", "0.65"))  # cosine distance threshold
+COLLECTION         = "doc_qa"
+NOT_FOUND_MESSAGE  = "I couldn't find that in the uploaded documents."
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. TEXT EXTRACTION
@@ -113,7 +115,10 @@ def build_vector_store(files) -> tuple[chromadb.Collection, int]:
         client.delete_collection(COLLECTION)
     except Exception:
         pass
-    collection = client.create_collection(COLLECTION)
+    collection = client.create_collection(
+        COLLECTION,
+        metadata={"hnsw:space": "cosine"}
+    )
 
     all_chunks: list[str]  = []
     all_ids:    list[str]  = []
@@ -153,10 +158,10 @@ def build_vector_store(files) -> tuple[chromadb.Collection, int]:
 # 5. RETRIEVAL + ANSWER GENERATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-def retrieve_chunks(question: str, collection: chromadb.Collection) -> list[dict]:
+def retrieve_chunks(question: str, collection: chromadb.Collection) -> tuple[list[dict], list[float]]:
     """
-    Embed *question* and return the top-K most similar chunks from ChromaDB.
-    Each result dict has keys: 'text', 'file', 'page'.
+    Embed *question* and return the top-K most similar chunks from ChromaDB
+    along with their cosine distances.
     """
     model = get_embedding_model()
     q_embedding = model.encode(question).tolist()
@@ -164,13 +169,29 @@ def retrieve_chunks(question: str, collection: chromadb.Collection) -> list[dict
     results = collection.query(
         query_embeddings = [q_embedding],
         n_results        = min(TOP_K, collection.count()),
-        include          = ["documents", "metadatas"],
+        include          = ["documents", "metadatas", "distances"],
     )
 
     chunks = []
-    for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
-        chunks.append({"text": doc, "file": meta["file"], "page": meta["page"]})
-    return chunks
+    distances = results.get("distances", [[]])[0]
+
+    print(f"\n[Retrieval] Question: '{question}'")
+    print(f"[Retrieval] Distances (lower = closer match): {[round(d, 4) for d in distances]}")
+    if distances:
+        print(f"[Retrieval] Best distance: {distances[0]:.4f} (threshold: {DISTANCE_THRESHOLD})")
+
+    docs = results.get("documents", [[]])[0]
+    metas = results.get("metadatas", [[]])[0]
+
+    for doc, meta, dist in zip(docs, metas, distances):
+        chunks.append({
+            "text": doc,
+            "file": meta["file"],
+            "page": meta["page"],
+            "distance": dist
+        })
+
+    return chunks, distances
 
 
 def generate_answer(question: str, context_chunks: list[dict]) -> str:
@@ -258,8 +279,8 @@ def main() -> None:
     for entry in st.session_state.chat_history:
         with st.chat_message(entry["role"]):
             st.markdown(entry["content"])
-            # Re-display source expanders for assistant messages
-            if entry["role"] == "assistant" and entry.get("sources"):
+            # Re-display source expanders for assistant messages (only if not a refusal)
+            if entry["role"] == "assistant" and entry.get("sources") and entry.get("content", "").strip() != NOT_FOUND_MESSAGE:
                 with st.expander("🔍 Sources"):
                     for s in entry["sources"]:
                         st.markdown(f"**{s['file']}** — page {s['page']}")
@@ -283,13 +304,20 @@ def main() -> None:
         # Retrieve + generate
         with st.chat_message("assistant"):
             with st.spinner("Searching documents and generating answer …"):
-                chunks = retrieve_chunks(question, st.session_state.collection)
-                answer = generate_answer(question, chunks)
+                chunks, distances = retrieve_chunks(question, st.session_state.collection)
+
+                # If best chunk distance is above threshold, skip LLM call
+                if distances and distances[0] > DISTANCE_THRESHOLD:
+                    print(f"[Threshold] Best distance {distances[0]:.4f} > {DISTANCE_THRESHOLD}. Skipping LLM call.")
+                    answer = NOT_FOUND_MESSAGE
+                else:
+                    answer = generate_answer(question, chunks)
 
             st.markdown(answer)
 
-            # Source expander
-            if chunks:
+            # Source expander: only show if answer is NOT the refusal message
+            is_refusal = (answer.strip() == NOT_FOUND_MESSAGE)
+            if chunks and not is_refusal:
                 with st.expander("🔍 Sources"):
                     for c in chunks:
                         st.markdown(f"**{c['file']}** — page {c['page']}")
@@ -300,7 +328,7 @@ def main() -> None:
         st.session_state.chat_history.append({
             "role":    "assistant",
             "content": answer,
-            "sources": chunks,
+            "sources": [] if is_refusal else chunks,
         })
 
 
