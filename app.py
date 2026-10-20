@@ -12,7 +12,6 @@ load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen/qwen3.8-27b")
-DISTANCE_THRESHOLD = float(os.getenv("DISTANCE_THRESHOLD", "0.72"))
 
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
@@ -443,12 +442,8 @@ def main() -> None:
 
         with st.chat_message("assistant"):
             with st.spinner("Searching documents..."):
-                chunks, distances = retrieve_chunks(search_query, st.session_state.collection, top_k=top_k)
-
-                if distances and distances[0] > DISTANCE_THRESHOLD:
-                    answer = REFUSAL_MESSAGE
-                else:
-                    answer = generate_answer(question, chunks)
+                chunks, _ = retrieve_chunks(search_query, st.session_state.collection, top_k=top_k)
+                answer = generate_answer(question, chunks)
 
             st.markdown(answer)
 
