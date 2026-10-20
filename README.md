@@ -1,6 +1,10 @@
 # Document Q&A Assistant
 
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://praptidodal-doc-qa-rag-app-6obiu1.streamlit.app/)
+
 A production-ready, minimal Retrieval-Augmented Generation (RAG) assistant built with Python, Streamlit, ChromaDB, Sentence-Transformers, and Groq.
+
+**Live Demo:** [https://praptidodal-doc-qa-rag-app-6obiu1.streamlit.app/](https://praptidodal-doc-qa-rag-app-6obiu1.streamlit.app/)
 
 ---
 
