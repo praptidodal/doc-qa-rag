@@ -370,10 +370,23 @@ def main() -> None:
         st.session_state.collection = collection
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []   # list of {role, content, sources, searched_for}
+    if "uploader_key" not in st.session_state:
+        st.session_state.uploader_key = 0
 
     # ── Sidebar — file upload, persistent index, & controls ──────────────────
     with st.sidebar:
         st.header("📂 Documents")
+
+        # Show flash message if redirected from an action
+        if st.session_state.get("flash_message"):
+            msg_type, msg_text = st.session_state.flash_message
+            if msg_type == "success":
+                st.success(msg_text)
+            elif msg_type == "info":
+                st.info(msg_text)
+            elif msg_type == "warning":
+                st.warning(msg_text)
+            del st.session_state.flash_message
 
         # Settings sliders
         st.subheader("⚙️ Settings")
@@ -399,6 +412,7 @@ def main() -> None:
                 "Choose file(s) to summarize or remove:",
                 options=indexed_files,
                 default=indexed_files,
+                key=f"indexed_select_{st.session_state.uploader_key}_{len(indexed_files)}",
                 help="Select which indexed files to summarize or delete.",
             )
 
@@ -419,7 +433,7 @@ def main() -> None:
                         st.session_state.collection.delete(where={"file": fname})
                 if "doc_summary" in st.session_state:
                     del st.session_state.doc_summary
-                st.success(f"Removed {len(selected_files)} file(s) from index!")
+                st.session_state.flash_message = ("success", f"Removed {len(selected_files)} file(s) from index!")
                 st.rerun()
         else:
             st.caption("No documents indexed yet.")
@@ -430,6 +444,7 @@ def main() -> None:
             "Upload PDF or TXT files",
             type=["pdf", "txt"],
             accept_multiple_files=True,
+            key=f"uploader_{st.session_state.uploader_key}",
         )
 
         col_proc, col_clear = st.columns(2)
@@ -446,19 +461,24 @@ def main() -> None:
                     chunk_size=chunk_size,
                 )
                 st.session_state.indexed_chunk_size = chunk_size
+
+            # Reset the uploader so a fresh upload button appears
+            st.session_state.uploader_key += 1
+
             if new_chunks > 0:
-                st.success(f"✅ Added **{new_chunks}** new chunks! (Total: {total_chunks})")
-                st.rerun()
+                st.session_state.flash_message = ("success", f"✅ Added **{new_chunks}** new chunks! (Total: {total_chunks})")
             else:
-                st.info("Uploaded files are already indexed.")
+                st.session_state.flash_message = ("info", "Uploaded files are already indexed.")
+            st.rerun()
 
         if clear_btn:
             collection = clear_vector_store(chroma_client)
             st.session_state.collection   = collection
             st.session_state.chat_history = []
+            st.session_state.uploader_key += 1
             if "doc_summary" in st.session_state:
                 del st.session_state.doc_summary
-            st.success("Cleared all indexed documents!")
+            st.session_state.flash_message = ("success", "Cleared all indexed documents!")
             st.rerun()
 
         # Show API key status
