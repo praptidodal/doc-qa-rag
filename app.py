@@ -99,34 +99,48 @@ def get_embedding_model() -> SentenceTransformer:
 # 4. BUILD VECTOR STORE
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_vector_store(files) -> tuple[chromadb.Collection, int]:
-    """
-    Embed all chunks from *files* and store them in an in-memory ChromaDB
-    collection.  The collection is rebuilt fresh on every call so re-uploading
-    replaces the previous index.
+@st.cache_resource
+def get_chroma_client() -> chromadb.PersistentClient:
+    """Return a persistent ChromaDB client storing data in chroma_db/."""
+    return chromadb.PersistentClient(path="chroma_db")
 
-    Returns (collection, total_chunk_count).
-    """
-    model  = get_embedding_model()
-    client = chromadb.Client()          # purely in-memory, nothing persisted
 
-    # Delete and recreate the collection so each "Process" starts clean
-    try:
-        client.delete_collection(COLLECTION)
-    except Exception:
-        pass
-    collection = client.create_collection(
+def get_collection(client: chromadb.PersistentClient) -> chromadb.Collection:
+    """Get or create the persistent cosine-distance collection."""
+    return client.get_or_create_collection(
         COLLECTION,
         metadata={"hnsw:space": "cosine"}
     )
 
+
+def get_indexed_files(collection: chromadb.Collection) -> list[str]:
+    """Return a sorted list of unique file names already indexed in ChromaDB."""
+    if collection.count() == 0:
+        return []
+    results = collection.get(include=["metadatas"])
+    metas = results.get("metadatas") or []
+    return sorted(list({m["file"] for m in metas if m and "file" in m}))
+
+
+def add_files_to_vector_store(files, collection: chromadb.Collection) -> tuple[int, int]:
+    """
+    Extract, chunk, and embed only new files not yet in ChromaDB.
+    Returns (new_chunks_count, total_chunks_count).
+    """
+    model = get_embedding_model()
+    already_indexed = set(get_indexed_files(collection))
+
     all_chunks: list[str]  = []
     all_ids:    list[str]  = []
     all_meta:   list[dict] = []
+    skipped_files: list[str] = []
 
     for f in files:
-        pages = extract_pages(f)
+        if f.name in already_indexed:
+            skipped_files.append(f.name)
+            continue
 
+        pages = extract_pages(f)
         if not pages:
             st.warning(
                 f"⚠️ **{f.name}** — no extractable text found "
@@ -141,8 +155,10 @@ def build_vector_store(files) -> tuple[chromadb.Collection, int]:
                 all_ids.append(uid)
                 all_meta.append({"file": f.name, "page": page_num})
 
+    if skipped_files:
+        st.info(f"Skipped {len(skipped_files)} already-indexed file(s): {', '.join(skipped_files)}")
+
     if all_chunks:
-        # Encode in one batch for efficiency
         embeddings = model.encode(all_chunks, show_progress_bar=False).tolist()
         collection.add(
             ids        = all_ids,
@@ -151,7 +167,19 @@ def build_vector_store(files) -> tuple[chromadb.Collection, int]:
             metadatas  = all_meta,
         )
 
-    return collection, len(all_chunks)
+    return len(all_chunks), collection.count()
+
+
+def clear_vector_store(client: chromadb.PersistentClient) -> chromadb.Collection:
+    """Delete the persistent collection and recreate an empty one."""
+    try:
+        client.delete_collection(COLLECTION)
+    except Exception:
+        pass
+    return client.create_collection(
+        COLLECTION,
+        metadata={"hnsw:space": "cosine"}
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -188,7 +216,8 @@ def retrieve_chunks(question: str, collection: chromadb.Collection) -> tuple[lis
             "text": doc,
             "file": meta["file"],
             "page": meta["page"],
-            "distance": dist
+            "distance": dist,
+            "match_pct": max(0, min(100, round((1.0 - dist) * 100))),
         })
 
     return chunks, distances
@@ -284,30 +313,56 @@ def main() -> None:
     st.title("📄 Document Q&A Assistant")
     st.caption("Upload documents, then ask questions — answers come only from your files.")
 
-    # ── Session state initialisation ─────────────────────────────────────────
-    if "collection"   not in st.session_state:
-        st.session_state.collection = None   # ChromaDB collection
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []   # list of {role, content, sources}
+    # ── Persistent collection & session state initialisation ──────────────────
+    chroma_client = get_chroma_client()
+    collection    = get_collection(chroma_client)
 
-    # ── Sidebar — file upload & processing ───────────────────────────────────
+    if "collection" not in st.session_state:
+        st.session_state.collection = collection
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []   # list of {role, content, sources, searched_for}
+
+    # ── Sidebar — file upload, persistent index, & controls ──────────────────
     with st.sidebar:
-        st.header("📂 Upload Documents")
+        st.header("📂 Documents")
+
+        # List already indexed files
+        indexed_files = get_indexed_files(st.session_state.collection)
+        if indexed_files:
+            st.markdown(f"**Indexed files ({len(indexed_files)}):**")
+            for fname in indexed_files:
+                st.caption(f"📄 {fname}")
+        else:
+            st.caption("No documents indexed yet.")
+
+        st.divider()
         uploaded_files = st.file_uploader(
-            "PDF or TXT files",
-            type        = ["pdf", "txt"],
-            accept_multiple_files = True,
+            "Upload PDF or TXT files",
+            type=["pdf", "txt"],
+            accept_multiple_files=True,
         )
 
-        if st.button("⚙️ Process documents", disabled=not uploaded_files):
-            with st.spinner("Extracting text, chunking, and embedding …"):
-                collection, n_chunks = build_vector_store(uploaded_files)
-                st.session_state.collection   = collection
-                st.session_state.chat_history = []   # reset chat on new docs
-            if n_chunks:
-                st.success(f"✅ Indexed **{n_chunks}** chunks from {len(uploaded_files)} file(s).")
+        col_proc, col_clear = st.columns(2)
+        with col_proc:
+            process_btn = st.button("⚙️ Process", disabled=not uploaded_files)
+        with col_clear:
+            clear_btn = st.button("🗑️ Clear all", disabled=(st.session_state.collection.count() == 0))
+
+        if process_btn:
+            with st.spinner("Extracting, chunking, and embedding new files …"):
+                new_chunks, total_chunks = add_files_to_vector_store(uploaded_files, st.session_state.collection)
+            if new_chunks > 0:
+                st.success(f"✅ Added **{new_chunks}** new chunks! (Total: {total_chunks})")
+                st.rerun()
             else:
-                st.error("No text could be extracted from the uploaded files.")
+                st.info("Uploaded files are already indexed.")
+
+        if clear_btn:
+            collection = clear_vector_store(chroma_client)
+            st.session_state.collection   = collection
+            st.session_state.chat_history = []
+            st.success("Cleared all indexed documents!")
+            st.rerun()
 
         # Show API key status
         st.divider()
@@ -323,11 +378,12 @@ def main() -> None:
             # Display rewritten search query if applicable
             if entry["role"] == "assistant" and entry.get("searched_for"):
                 st.markdown(f"<small style='color: grey;'>Searched for: {entry['searched_for']}</small>", unsafe_allow_html=True)
-            # Re-display source expanders for assistant messages (only if not a refusal)
+            # Re-display source expanders with match percentage
             if entry["role"] == "assistant" and entry.get("sources") and entry.get("content", "").strip() != NOT_FOUND_MESSAGE:
                 with st.expander("🔍 Sources"):
                     for s in entry["sources"]:
-                        st.markdown(f"**{s['file']}** — page {s['page']}")
+                        match_info = f" · **{s.get('match_pct', 0)}% match**" if "match_pct" in s else ""
+                        st.markdown(f"**{s['file']}** — page {s['page']}{match_info}")
                         st.text(s["text"])
                         st.divider()
 
@@ -336,7 +392,7 @@ def main() -> None:
 
     if question:
         # Guard: documents must be indexed first
-        if st.session_state.collection is None:
+        if st.session_state.collection is None or st.session_state.collection.count() == 0:
             st.warning("⬅️ Please upload and process documents first.")
             st.stop()
 
@@ -374,7 +430,8 @@ def main() -> None:
             if chunks and not is_refusal:
                 with st.expander("🔍 Sources"):
                     for c in chunks:
-                        st.markdown(f"**{c['file']}** — page {c['page']}")
+                        match_info = f" · **{c.get('match_pct', 0)}% match**" if "match_pct" in c else ""
+                        st.markdown(f"**{c['file']}** — page {c['page']}{match_info}")
                         st.text(c["text"])
                         st.divider()
 
