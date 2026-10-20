@@ -29,7 +29,7 @@ CHUNK_OVERLAP = 50     # characters shared between neighbouring chunks
 TOP_K              = 4      # number of chunks to retrieve
 EMBED_MODEL        = "all-MiniLM-L6-v2"
 LLM_MODEL          = os.getenv("LLM_MODEL", "qwen/qwen3.8-27b")  # override in .env
-DISTANCE_THRESHOLD = float(os.getenv("DISTANCE_THRESHOLD", "0.65"))  # cosine distance threshold
+DISTANCE_THRESHOLD = float(os.getenv("DISTANCE_THRESHOLD", "0.72"))  # cosine distance threshold
 COLLECTION         = "doc_qa"
 NOT_FOUND_MESSAGE  = "I couldn't find that in the uploaded documents."
 
